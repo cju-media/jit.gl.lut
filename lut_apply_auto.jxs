@@ -1,0 +1,117 @@
+<jittershader name="lut_apply_auto">
+	<description>
+		Applies a 3D color LUT to incoming video, auto-detecting the LUT
+		image's layout from its own pixel dimensions -- no per-LUT
+		parameter needed. Video is input 0, the LUT image is input 1,
+		read as a rectangle texture in pixel coordinates.
+
+		Supported layouts, detected from the LUT texture's width/height:
+		  - Square (width == height): standard Hald CLUT, raster-packed
+		    (red fastest, then green, then blue). level = cbrt(width).
+		  - Wide strip (width == height^2): single-row tile strip, one
+		    tile per blue slice, all tiles in one row. N = height.
+	</description>
+
+	<param name="tex0" type="int" default="0" />
+	<param name="tex1" type="int" default="1" />
+	<param name="texDim1" type="vec2" state="TEXDIM1" />
+
+	<!-- 0 = bypass (original video), 1 = full LUT, in between = blend -->
+	<param name="amount" type="float" default="1.0" />
+
+	<language name="glsl" version="1.2">
+		<bind param="tex0" program="fp" />
+		<bind param="tex1" program="fp" />
+		<bind param="texDim1" program="fp" />
+		<bind param="amount" program="fp" />
+
+		<program name="vp" type="vertex">
+<![CDATA[
+#version 120
+
+varying vec2 uv0;
+
+void main()
+{
+	gl_Position = ftransform();
+	uv0 = (gl_TextureMatrix[0] * gl_MultiTexCoord0).xy;
+}
+]]>
+		</program>
+
+		<program name="fp" type="fragment">
+<![CDATA[
+#version 120
+
+varying vec2 uv0;
+
+uniform sampler2DRect tex0;   // video
+uniform sampler2DRect tex1;   // LUT image (Hald CLUT or single-row strip)
+uniform vec2 texDim1;         // LUT texture's pixel dimensions, auto-supplied
+uniform float amount;         // blend amount, 0..1
+
+// Fetch one exact LUT sample given integer channel indices (each 0..N-1).
+// texture2DRect wants pixel coordinates; +0.5 lands on the texel center.
+vec3 fetchLut(vec3 idx, float N, float W, bool isHald)
+{
+	vec2 texel;
+	if (isHald) {
+		// Hald: raster-scan flat index across a W-wide square image.
+		float i = idx.b * N * N + idx.g * N + idx.r;
+		texel = vec2(mod(i, W), floor(i / W));
+	} else {
+		// Strip: tiles side by side in a single row, tile size N x N.
+		texel = vec2(idx.b * N + idx.r, idx.g);
+	}
+	return texture2DRect(tex1, texel + 0.5).rgb;
+}
+
+void main()
+{
+	vec4 videoColor = texture2DRect(tex0, uv0);
+	vec3 c = clamp(videoColor.rgb, 0.0, 1.0);
+
+	bool isHald = abs(texDim1.x - texDim1.y) < 0.5;
+
+	float N, W;
+	if (isHald) {
+		float level = floor(pow(texDim1.x, 1.0 / 3.0) + 0.5);
+		N = level * level;
+		W = texDim1.x;
+	} else {
+		N = texDim1.y; // strip: tile size == image height == samples/channel
+		W = texDim1.x; // unused by the strip branch, kept for symmetry
+	}
+
+	vec3 scaled = c * (N - 1.0);
+	vec3 i0 = floor(scaled);
+	vec3 i1 = min(i0 + 1.0, N - 1.0);
+	vec3 f  = fract(scaled);
+
+	// Manual trilinear: 8 corner taps, since neighboring LUT samples are
+	// not generally neighboring pixels in either layout.
+	vec3 c000 = fetchLut(vec3(i0.r, i0.g, i0.b), N, W, isHald);
+	vec3 c100 = fetchLut(vec3(i1.r, i0.g, i0.b), N, W, isHald);
+	vec3 c010 = fetchLut(vec3(i0.r, i1.g, i0.b), N, W, isHald);
+	vec3 c110 = fetchLut(vec3(i1.r, i1.g, i0.b), N, W, isHald);
+	vec3 c001 = fetchLut(vec3(i0.r, i0.g, i1.b), N, W, isHald);
+	vec3 c101 = fetchLut(vec3(i1.r, i0.g, i1.b), N, W, isHald);
+	vec3 c011 = fetchLut(vec3(i0.r, i1.g, i1.b), N, W, isHald);
+	vec3 c111 = fetchLut(vec3(i1.r, i1.g, i1.b), N, W, isHald);
+
+	vec3 c00 = mix(c000, c100, f.r);
+	vec3 c10 = mix(c010, c110, f.r);
+	vec3 c01 = mix(c001, c101, f.r);
+	vec3 c11 = mix(c011, c111, f.r);
+
+	vec3 cA = mix(c00, c10, f.g);
+	vec3 cB = mix(c01, c11, f.g);
+
+	vec3 graded = mix(cA, cB, f.b);
+
+	gl_FragColor = vec4(mix(videoColor.rgb, graded, amount), videoColor.a);
+}
+]]>
+		</program>
+	</language>
+</jittershader>

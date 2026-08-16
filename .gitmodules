@@ -1,0 +1,3 @@
+[submodule "HaldCLUT"]
+	path = HaldCLUT
+	url = https://github.com/cedeber/hald-clut.git
